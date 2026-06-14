@@ -678,7 +678,9 @@ textarea{resize:vertical;min-height:80px}
 
       <!-- LIST -->
       <div class="admin-list">
-        <h3>📦 Produits <span class="admin-count" id="adminCount">0</span></h3>
+        <h3>📦 Produits <span class="admin-count" id="adminCount">0</span>
+          <button onclick="clearAllProducts()" style="margin-left:auto;background:#FEE2E2;border:none;border-radius:10px;padding:6px 14px;font-size:.75rem;font-weight:900;color:#EF4444;cursor:pointer;font-family:'Nunito',sans-serif;transition:all .2s" onmouseover="this.style.background='#EF4444';this.style.color='white'" onmouseout="this.style.background='#FEE2E2';this.style.color='#EF4444'">🗑️ Tout effacer</button>
+        </h3>
         <input type="text" class="admin-search" placeholder="🔍 Rechercher un produit…" oninput="searchAdmin(this.value)">
         <table class="ptable">
           <thead><tr><th></th><th>Nom</th><th>Catégorie</th><th>Prix</th><th>Actions</th></tr></thead>
@@ -693,7 +695,7 @@ textarea{resize:vertical;min-height:80px}
 /* ══════════════════════════════════════
    STATE & STORAGE
 ══════════════════════════════════════ */
-const STORE_KEY = 'mignon_products_v3';
+const STORE_KEY = 'mignon_products_v4'; // v4 = catalogue vide par défaut
 const ADMIN_PWD = 'Mignon2025'; // ← modifie ici ton mot de passe
 
 let products = [];
@@ -708,30 +710,22 @@ let filteredProds = [];
 let shown = 0;
 const PAGE = 8;
 
-// Load from localStorage
+// Load from localStorage — démarre toujours VIDE à la première visite
 function loadStore() {
-  try { products = JSON.parse(localStorage.getItem(STORE_KEY)) || []; } catch { products = []; }
-  if (!products.length) products = getDefaultProducts();
+  try {
+    const raw = localStorage.getItem(STORE_KEY);
+    products = raw !== null ? (JSON.parse(raw) || []) : [];
+  } catch { products = []; }
   saveStore();
 }
 function saveStore() { localStorage.setItem(STORE_KEY, JSON.stringify(products)); }
 
-/* ══ DEFAULT PRODUCTS ══ */
-function getDefaultProducts() {
-  return [
-    {id:1,emoji:'👗',img:null,name:'Robe Princesse Rose',cat:'textile',gender:'fille',age:'enfant',price:1800,old:2200,colors:['#FF6B9D','#FFB3D1','#FFFFFF'],sizes:['2ans','3ans','4ans','5ans','6ans'],badge:'Nouveauté',desc:'Belle robe en coton doux, broderies et nœuds. Parfaite pour les sorties et fêtes.'},
-    {id:2,emoji:'👕',img:null,name:'Ensemble Garçon Marine',cat:'textile',gender:'garcon',age:'enfant',price:1500,colors:['#1A6E68','#2EC4B6','#FFFFFF'],sizes:['2ans','3ans','4ans','5ans'],badge:'Best-Seller',desc:'Ensemble haut + bas en jersey respirant. Confortable pour le quotidien.'},
-    {id:3,emoji:'🍼',img:null,name:'Combinaison Nouveau-Né',cat:'textile',gender:'mixte',age:'nouveau-ne',price:900,old:1100,colors:['#FF6B9D','#2EC4B6','#FFFACD'],sizes:['NB','1M','3M'],badge:'Promo',desc:'Combinaison 100% coton pour premiers mois. Fermeture pression pratique.'},
-    {id:4,emoji:'👑',img:null,name:'Robe Cérémonie Tulle',cat:'textile',gender:'fille',age:'enfant',price:3200,colors:['#FFFFFF','#FFB3D1','#FFD700'],sizes:['2ans','3ans','4ans','5ans','6ans'],badge:'Luxe',desc:'Robe de cérémonie en tulle avec corsage orné. Idéale mariages et fêtes.'},
-    {id:5,emoji:'🌡️',img:null,name:'Thermomètre Digital Bébé',cat:'accessoire',gender:'mixte',age:'bebe',price:1200,colors:['#FFFFFF','#2EC4B6'],sizes:['Unique'],badge:null,desc:'Thermomètre infrarouge auriculaire. Précis, rapide (1 sec). Idéal bébé.'},
-    {id:6,emoji:'🍼',img:null,name:'Biberon Anti-Colique 250ml',cat:'accessoire',gender:'mixte',age:'bebe',price:650,old:850,colors:['#FFFFFF','#FFB3D1','#B2F0ED'],sizes:['150ml','250ml'],badge:'Promo',desc:'Tétine physiologique, valve anti-colique. Sans BPA.'},
-    {id:7,emoji:'🍬',img:null,name:'Sucette Orthodontique',cat:'accessoire',gender:'mixte',age:'bebe',price:350,colors:['#FF6B9D','#2EC4B6','#FFFACD'],sizes:['0-6M','6-18M'],badge:null,desc:'Sucette en silicone souple. Forme orthodontique respectant la croissance dentaire.'},
-    {id:8,emoji:'🧴',img:null,name:'Crème Hydratante Bébé',cat:'cosmetique',gender:'mixte',age:'bebe',price:750,colors:['#FFFFFF'],sizes:['150ml','250ml'],badge:null,desc:'Sans parfum, hypoallergénique, certifiée dermatologue. 100% naturel.'},
-    {id:9,emoji:'🛁',img:null,name:'Gel Douche 2-en-1 Bébé',cat:'cosmetique',gender:'mixte',age:'bebe',price:680,old:850,colors:['#FFFFFF'],sizes:['250ml','400ml'],badge:'Promo',desc:'Gel douche + shampoing sans larmes. Formule hypoallergénique. Bimbo.'},
-    {id:10,emoji:'🎀',img:null,name:'Set Accessoires Fille x5',cat:'accessoire',gender:'fille',age:'bebe',price:550,colors:['#FF6B9D','#2EC4B6','#FFD700'],sizes:['Unique'],badge:'Nouveauté',desc:'Set diadème + 2 barrettes + 2 chouchous. Coloris rose & turquoise.'},
-    {id:11,emoji:'👟',img:null,name:'Chaussures Premiers Pas',cat:'accessoire',gender:'mixte',age:'bebe',price:1200,old:1600,colors:['#FF6B9D','#2EC4B6','#FFFFFF','#F7C948'],sizes:['18','19','20','21','22'],badge:'Best-Seller',desc:'Semelle souple anatomique. Respirant, confortable pour les premiers pas.'},
-    {id:12,emoji:'🤵',img:null,name:'Costume Garçon Cérémonie',cat:'textile',gender:'garcon',age:'enfant',price:2800,old:3500,colors:['#1A1A2E','#FFFFFF'],sizes:['2ans','3ans','4ans','5ans'],badge:'Promo',desc:'Costume 3 pièces (veste, chemise, pantalon). Élégant et confortable.'},
-  ];
+// Supprime TOUS les produits
+function clearAllProducts() {
+  if (!confirm('⚠️ Supprimer TOUS les produits ?\n\nCette action est irréversible.')) return;
+  products = []; saveStore();
+  filterP('all', null); updateAgeCounts(); renderAdminTable();
+  showAdminMsg('🗑️ Tous les produits supprimés.', 'var(--rose)');
 }
 
 /* ══ WILAYAS ══ */
@@ -993,9 +987,10 @@ function renderColorChips() {
 function saveProduct() {
   const name = document.getElementById('fName').value.trim();
   const price = parseInt(document.getElementById('fPrice').value);
-  if (!name) { alert('Entrez le nom du produit'); return; }
-  if (!price || price <= 0) { alert('Entrez un prix valide'); return; }
+  if (!name) { showAdminMsg('⚠️ Entrez le nom du produit', 'var(--rose)'); return; }
+  if (!price || price <= 0) { showAdminMsg('⚠️ Entrez un prix valide', 'var(--rose)'); return; }
 
+  const wasEditing = !!editingId;
   const prod = {
     id: editingId || Date.now(),
     emoji: document.getElementById('fEmoji').value || '🌸',
@@ -1012,7 +1007,7 @@ function saveProduct() {
     desc: document.getElementById('fDesc').value.trim(),
   };
 
-  if (editingId) {
+  if (wasEditing) {
     const idx = products.findIndex(p => p.id === editingId);
     if (idx !== -1) products[idx] = prod;
   } else {
@@ -1023,14 +1018,17 @@ function saveProduct() {
   filterP('all', null);
   updateAgeCounts();
   renderAdminTable();
-  resetForm();
 
-  const msg = document.getElementById('saveMsg');
-  msg.textContent = editingId ? '✅ Produit modifié avec succès !' : '✅ Produit ajouté avec succès !';
-  msg.style.color = 'var(--turq-d)'; msg.style.display = 'block';
-  setTimeout(() => msg.style.display = 'none', 3000);
-  editingId = null;
-  document.getElementById('formTitle').textContent = '➕ Ajouter un produit';
+  if (wasEditing) {
+    // Après modification : on reste sur le produit modifié
+    showAdminMsg('✅ Produit modifié avec succès !', 'var(--turq-d)');
+    editingId = null;
+    document.getElementById('formTitle').textContent = '➕ Ajouter un produit';
+  } else {
+    // Après ajout : on vide juste le formulaire pour AJOUTER LE SUIVANT directement
+    showAdminMsg(`✅ "${name}" ajouté ! Formulaire prêt pour le prochain produit.`, 'var(--turq-d)');
+    resetForm();
+  }
 }
 
 // ── EDIT ──
@@ -1115,6 +1113,14 @@ function renderAdminTable(query='') {
 }
 
 function searchAdmin(q) { renderAdminTable(q); }
+
+// ── MESSAGE HELPER ──
+function showAdminMsg(text, color) {
+  const msg = document.getElementById('saveMsg');
+  msg.textContent = text; msg.style.color = color; msg.style.display = 'block';
+  clearTimeout(showAdminMsg._t);
+  showAdminMsg._t = setTimeout(() => msg.style.display = 'none', 4000);
+}
 
 /* ══ UTILS ══ */
 function goTo(id) { document.getElementById(id)?.scrollIntoView({behavior:'smooth'}); }
