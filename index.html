@@ -17,7 +17,7 @@
     style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
     font-src https://fonts.gstatic.com;
     img-src 'self' data: blob: https:;
-    connect-src https://script.google.com https://script.googleusercontent.com https://formspree.io https://api.web3forms.com;
+    connect-src 'self' https://script.google.com https://script.googleusercontent.com https://formspree.io https://api.web3forms.com;
     object-src 'none';
     base-uri 'self';
     form-action 'none';
@@ -1261,7 +1261,7 @@ textarea.co-in{height:auto;min-height:110px;padding:12px 14px;resize:vertical}
         </div>
 
         <!-- COPIER CODE HTML (pour intégrer dans index.html) -->
-        <div style="background:var(--turq-p);border:1.5px solid var(--turq-l);border-radius:12px;padding:10px 14px;margin-bottom:1rem;font-size:.78rem;color:var(--turq-d)">
+        <div id="adminTip" style="background:var(--turq-p);border:1.5px solid var(--turq-l);border-radius:12px;padding:10px 14px;margin-bottom:1rem;font-size:.78rem;color:var(--turq-d)">
           <strong>💡 Astuce :</strong> Après avoir ajouté vos produits, cliquez sur
           <button onclick="generateHtmlCatalog()" style="background:var(--turq-d);color:white;border:none;border-radius:8px;padding:4px 10px;font-weight:900;font-size:.75rem;font-family:'Nunito',sans-serif;cursor:pointer;margin:0 4px">
             📄 Générer index.html
@@ -1284,8 +1284,20 @@ textarea.co-in{height:auto;min-height:110px;padding:12px 14px;resize:vertical}
    STATE & STORAGE
 ══════════════════════════════════════ */
 const STORE_KEY = 'mignon_products_v4'; // v4 = catalogue vide par défaut
-const ADMIN_PWD = 'Mignon2025'; // ← modifie ici ton mot de passe
+// Mot de passe admin utilisé SEULEMENT si ORDER_ENDPOINT est vide (mode hors ligne).
+// Quand le script Google est branché, le mot de passe est vérifié par Google (ADMIN_KEY dans le script).
+const ADMIN_PWD = 'Mignon2025';
 
+// ⚠️ À configurer : URL du script Google (commandes ET produits en ligne)
+//   • Google Apps Script : URL de l'application web (finit par /exec)
+//   • Formspree          : https://formspree.io/f/xxxxxxx
+//   • Web3Forms          : https://api.web3forms.com/submit  (+ ORDER_ACCESS_KEY)
+// Si vide, la commande est envoyée par WhatsApp en secours (le site continue de fonctionner).
+const ORDER_ENDPOINT   = 'https://script.google.com/macros/s/AKfycbwNOW6RA17M-JfigyZjAsWSNSX9l0aMg0PBj-_t6g5HxsE4NpbOHTUM2buvnzvxossHEA/exec';
+const ORDER_ACCESS_KEY = '';              // Web3Forms uniquement
+const ORDER_WA_FALLBACK = '213549161858'; // secours si ORDER_ENDPOINT est vide
+
+const IMG_OK = /^(?:data:image\/(?:jpeg|png|webp|gif);base64,|https:\/\/lh3\.googleusercontent\.com\/d\/[\w-]+$)/;
 let products = [];
 let cart = [];
 let editingId = null;
@@ -1343,7 +1355,7 @@ async function loadStore() {
 }
 
 // Sauvegarde UN SEUL produit (ajout ou modification) — beaucoup plus rapide que tout réécrire
-async function saveOneProduct(prod) {
+async function saveLocalProduct(prod) {
   try {
     const db = await openDB();
     const tx = db.transaction(STORE_NAME, 'readwrite');
@@ -1362,7 +1374,7 @@ async function saveOneProduct(prod) {
 }
 
 // Supprime UN SEUL produit par son id
-async function deleteOneProduct(id) {
+async function deleteLocalProduct(id) {
   try {
     const db = await openDB();
     const tx = db.transaction(STORE_NAME, 'readwrite');
@@ -1381,7 +1393,7 @@ async function deleteOneProduct(id) {
 }
 
 // Supprime TOUT le contenu de la base (bouton "Tout effacer")
-async function clearStore() {
+async function clearLocalStore() {
   try {
     const db = await openDB();
     const tx = db.transaction(STORE_NAME, 'readwrite');
@@ -1396,6 +1408,87 @@ async function clearStore() {
     console.error('Erreur vidage IndexedDB:', e);
     return false;
   }
+}
+
+/* ══════════════════════════════════════
+   PRODUITS EN LIGNE — Google Sheets + Google Drive (via le script Google)
+   Les produits ajoutés dans l'admin sont enregistrés en ligne : tous les clients les voient.
+══════════════════════════════════════ */
+const STORE_API_ON = () => /^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/.test(ORDER_ENDPOINT);
+let adminKey = ''; // mot de passe admin : gardé en mémoire seulement (jamais écrit sur le disque)
+
+async function apiPost(payload, timeoutMs) {
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), timeoutMs || 60000);
+  try {
+    // text/plain : requête « simple » (pas de pré-vérification CORS) — le script lit le JSON
+    const r = await fetch(ORDER_ENDPOINT, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(payload), signal: ctl.signal });
+    return await r.json();
+  } finally { clearTimeout(t); }
+}
+function apiErrText(res) {
+  const e = res && res.error;
+  if (e === 'unauthorized') return 'Mot de passe refusé. Fermez l’admin et reconnectez-vous.';
+  if (e === 'locked') return 'Trop de tentatives. Réessayez dans 10 minutes.';
+  if (e === 'not_configured') return 'Mot de passe admin non défini dans le script Google (ADMIN_KEY).';
+  if (e === 'invalid_product') return 'Produit invalide : vérifiez le nom, le prix et les choix.';
+  if (e === 'image_too_big') return 'Photo trop lourde.';
+  return 'Erreur du serveur. Réessayez.';
+}
+
+// Écritures de l'admin : d'abord en ligne, puis dans le cache local
+async function saveOneProduct(prod) {
+  if (STORE_API_ON() && adminKey) {
+    showAdminMsg('⏳ Enregistrement en ligne… (photo comprise)', 'var(--turq-d)');
+    try {
+      const res = await apiPost({ action: 'save', key: adminKey, product: prod }, 90000);
+      if (!res || !res.ok) { showAdminMsg('❌ ' + apiErrText(res), 'var(--rose)'); return false; }
+      if (res.product && validateProduct(res.product)) { prod.img = res.product.img || null; prod.imgId = res.product.imgId || ''; }
+    } catch (e) {
+      showAdminMsg('❌ Connexion impossible : le produit n’a PAS été enregistré en ligne. Réessayez.', 'var(--rose)');
+      return false;
+    }
+  }
+  return saveLocalProduct(prod);
+}
+async function deleteOneProduct(id) {
+  if (STORE_API_ON() && adminKey) {
+    try {
+      const res = await apiPost({ action: 'delete', key: adminKey, id }, 60000);
+      if (!res || !res.ok) { showAdminMsg('❌ ' + apiErrText(res), 'var(--rose)'); return false; }
+    } catch (e) { showAdminMsg('❌ Connexion impossible : suppression non effectuée.', 'var(--rose)'); return false; }
+  }
+  return deleteLocalProduct(id);
+}
+async function clearStore() {
+  if (STORE_API_ON() && adminKey) {
+    try {
+      const res = await apiPost({ action: 'clear', key: adminKey }, 90000);
+      if (!res || !res.ok) { showAdminMsg('❌ ' + apiErrText(res), 'var(--rose)'); return false; }
+    } catch (e) { showAdminMsg('❌ Connexion impossible : suppression non effectuée.', 'var(--rose)'); return false; }
+  }
+  return clearLocalStore();
+}
+
+// Lecture publique : la liste des produits vient du Google Sheets
+async function syncFromServer() {
+  if (!STORE_API_ON()) return false;
+  try {
+    const r = await fetch(ORDER_ENDPOINT + '?action=products&t=' + Date.now());
+    const data = await r.json();
+    if (!data || !data.ok || !Array.isArray(data.products)) return false;
+    const list = data.products.filter(p => { try { return validateProduct(p); } catch { return false; } });
+    await clearLocalStore();                         // le cache local = copie de la liste en ligne
+    for (const p of list) await saveLocalProduct(p);
+    products = list;
+    return true;
+  } catch (e) { console.warn('Produits en ligne indisponibles :', e); return false; }
+}
+function afterSync() {
+  if (!products.length) products = DEMO_PRODUCTS.map(p => ({...p}));
+  filterP('all', null); updateAgeCounts();
+  if (document.getElementById('adminOverlay').classList.contains('open')) renderAdminTable();
+  refreshCheckoutProducts();
 }
 
 // ── Migration automatique : récupère les anciens produits localStorage (v4) et les importe dans IndexedDB ──
@@ -1518,11 +1611,15 @@ const DEMO_PRODUCTS = [
 
 async function initApp() {
   await migrateFromLocalStorage(); // récupère automatiquement les anciens produits si présents
-  await loadStore();
+  await loadStore();               // cache local (affichage immédiat)
+  const syncP = STORE_API_ON() ? syncFromServer() : Promise.resolve(false);
+  // premier visiteur (pas de cache) : on attend un peu la liste en ligne pour ne pas afficher les exemples
+  if (!products.length && STORE_API_ON()) await Promise.race([syncP, new Promise(r => setTimeout(r, 8000))]);
   if (!products.length) products = DEMO_PRODUCTS.map(p => ({...p}));
   filterP('all', null);
   if (location.hash.indexOf('#commande') === 0) showCheckout();
   updateAgeCounts();
+  syncP.then(ok => { if (ok) afterSync(); });
 }
 initApp();
 
@@ -1591,7 +1688,7 @@ function makeCard(p) {
   const catLabel = p.cat==='textile'?'👗 Textile':p.cat==='accessoire'?'🎀 Accessoire':p.cat==='cosmetique'?'🧴 Cosmétique':'—';
   const genLabel = p.gender==='fille'?'👧 Fille':p.gender==='garcon'?'👦 Garçon':'👶 Mixte';
   // Image : src validé data: uniquement ou vide
-  const safeImg = p.img && /^data:image\/(jpeg|png|webp|gif);base64,/.test(p.img) ? p.img : null;
+  const safeImg = p.img && IMG_OK.test(p.img) ? p.img : null;
   const imgContent = safeImg
     ? `<img src="${safeImg}" alt="${safeName}" loading="lazy" onerror="this.style.display='none';this.nextSibling.style.display='block'"><div class="ei" style="display:none">${p.emoji||'👗'}</div>`
     : `<div class="ei">${p.emoji||'👗'}</div>`;
@@ -1622,7 +1719,7 @@ function openModal(id) {
   curProduct = p; selSize = null; selDeliveryMode = 'domicile';
 
   // Image : valider que c'est bien une data URI image
-  const safeImg = p.img && /^data:image\/(jpeg|png|webp|gif);base64,/.test(p.img) ? p.img : null;
+  const safeImg = p.img && IMG_OK.test(p.img) ? p.img : null;
   const mpi = document.getElementById('mpi');
   if (safeImg) {
     const img = document.createElement('img');
@@ -1759,7 +1856,7 @@ function renderCart() {
   l.innerHTML = '';
   cart.forEach((it, i) => {
     const item = document.createElement('div'); item.className = 'ci';
-    const safeImg = it.img && /^data:image\/(jpeg|png|webp|gif);base64,/.test(it.img) ? it.img : null;
+    const safeImg = it.img && IMG_OK.test(it.img) ? it.img : null;
     const ce = document.createElement('div'); ce.className = 'ce';
     if (safeImg) { const img = document.createElement('img'); img.src = safeImg; img.style.cssText='width:44px;height:44px;border-radius:10px;object-fit:cover'; ce.appendChild(img); }
     else { ce.textContent = it.emoji || '🌸'; }
@@ -1789,14 +1886,6 @@ function toggleCart() { document.getElementById('cartSide').classList.toggle('op
 /* ══════════════════════════════════════
    COMMANDE DIRECTE — page de commande dans un nouvel onglet (#commande) — arabe / français
 ══════════════════════════════════════ */
-// ⚠️ À configurer : URL qui reçoit les commandes
-//   • Google Apps Script : URL de l'application web (finit par /exec)
-//   • Formspree          : https://formspree.io/f/xxxxxxx
-//   • Web3Forms          : https://api.web3forms.com/submit  (+ ORDER_ACCESS_KEY)
-// Si vide, la commande est envoyée par WhatsApp en secours (le site continue de fonctionner).
-const ORDER_ENDPOINT   = '';
-const ORDER_ACCESS_KEY = '';              // Web3Forms uniquement
-const ORDER_WA_FALLBACK = '213549161858'; // secours si ORDER_ENDPOINT est vide
 
 // Noms arabes des wilayas (clé = code)
 const WILAYAS_AR = {'01':'أدرار','02':'الشلف','03':'الأغواط','04':'أم البواقي','05':'باتنة','06':'بجاية','07':'بسكرة','08':'بشار','09':'البليدة','10':'البويرة','11':'تمنراست','12':'تبسة','13':'تلمسان','14':'تيارت','15':'تيزي وزو','16':'الجزائر','17':'الجلفة','18':'جيجل','19':'سطيف','20':'سعيدة','21':'سكيكدة','22':'سيدي بلعباس','23':'عنابة','24':'قالمة','25':'قسنطينة','26':'المدية','27':'مستغانم','28':'المسيلة','29':'معسكر','30':'ورقلة','31':'وهران','32':'البيض','33':'إليزي','34':'برج بوعريريج','35':'بومرداس','36':'الطارف','37':'تندوف','38':'تيسمسيلت','39':'الوادي','40':'خنشلة','41':'سوق أهراس','42':'تيبازة','43':'ميلة','44':'عين الدفلى','45':'النعامة','46':'عين تموشنت','47':'غرداية','48':'غليزان','49':'تيميمون','50':'برج باجي مختار','51':'أولاد جلال','52':'بني عباس','53':'إن صالح','54':'إن قزام','55':'تقرت','56':'جانت','57':'المغير','58':'المنيعة'};
@@ -1943,13 +2032,24 @@ function showCheckout() {
       return {
         id: i.id, name: String(p ? p.name : i.name).slice(0, 200), size: i.size.slice(0, 20),
         price: p ? +p.price : i.price, emoji: p ? p.emoji : '🌸',
-        img: p && p.img && /^data:image\/(jpeg|png|webp|gif);base64,/.test(p.img) ? p.img : null
+        img: p && p.img && IMG_OK.test(p.img) ? p.img : null
       };
     });
     document.getElementById('coWilaya').value = data.wilaya;
   }
   applyCoLang();
   if (data) document.getElementById('coWilaya').value = data.wilaya;
+  updCo();
+}
+
+
+// Quand la liste en ligne arrive après l'ouverture de la page de commande : met à jour nom / prix / photo
+function refreshCheckoutProducts() {
+  if (!document.documentElement.classList.contains('co') || !orderItems.length) return;
+  orderItems = orderItems.map(i => {
+    const p = products.find(x => String(x.id) === String(i.id));
+    return p ? { ...i, name: String(p.name).slice(0, 200), price: +p.price, emoji: p.emoji || '🌸', img: p.img && IMG_OK.test(p.img) ? p.img : null } : i;
+  });
   updCo();
 }
 
@@ -2099,45 +2199,64 @@ function closeLogin() {
   document.getElementById('pwdInput').value = '';
   document.getElementById('errMsg').style.display = 'none';
 }
-function checkPwd() {
+async function checkPwd() {
+  const errEl = document.getElementById('errMsg');
   // Anti-brute force : 5 tentatives max, blocage 5 minutes
   if (loginLocked && Date.now() < lockUntil) {
     const mins = Math.ceil((lockUntil - Date.now()) / 60000);
-    document.getElementById('errMsg').textContent = `🔒 Trop de tentatives. Réessayez dans ${mins} min.`;
-    document.getElementById('errMsg').style.display = 'block';
+    errEl.textContent = `🔒 Trop de tentatives. Réessayez dans ${mins} min.`;
+    errEl.style.display = 'block';
     return;
   }
   if (loginLocked && Date.now() >= lockUntil) {
     loginAttempts = 0; loginLocked = false;
   }
   const val = document.getElementById('pwdInput').value;
-  if (val === ADMIN_PWD) {
+  let okLogin = false, netErr = false, serverMsg = '';
+  if (STORE_API_ON()) {
+    // Le mot de passe est vérifié par Google (ADMIN_KEY dans le script)
+    errEl.textContent = '⏳ Vérification…'; errEl.style.display = 'block';
+    try {
+      const res = await apiPost({ action: 'auth', key: val }, 25000);
+      if (res && res.ok) { okLogin = true; adminKey = val; }
+      else if (res && res.error === 'locked') serverMsg = '🔒 Trop de tentatives. Réessayez dans 10 minutes.';
+      else if (res && res.error === 'not_configured') serverMsg = '⚠️ Mot de passe admin non défini dans le script Google (ADMIN_KEY).';
+      else if (!res || res.error !== 'unauthorized') netErr = true;
+    } catch (e) { netErr = true; }
+  } else {
+    okLogin = (val === ADMIN_PWD);
+  }
+  if (okLogin) {
     loginAttempts = 0; loginLocked = false;
     closeLogin(); openAdmin();
-  } else {
-    loginAttempts++;
-    document.getElementById('pwdInput').value = '';
-    document.getElementById('pwdInput').focus();
-    if (loginAttempts >= 5) {
-      loginLocked = true; lockUntil = Date.now() + 5 * 60 * 1000;
-      document.getElementById('errMsg').textContent = '🔒 Compte bloqué 5 minutes — trop de tentatives.';
-    } else {
-      document.getElementById('errMsg').textContent = `❌ Mot de passe incorrect (${5-loginAttempts} essai(s) restant(s))`;
-    }
-    document.getElementById('errMsg').style.display = 'block';
+    return;
   }
+  if (netErr) { errEl.textContent = '❌ Connexion impossible. Vérifiez internet et réessayez.'; errEl.style.display = 'block'; return; }
+  if (serverMsg) { errEl.textContent = serverMsg; errEl.style.display = 'block'; return; }
+  loginAttempts++;
+  document.getElementById('pwdInput').value = '';
+  document.getElementById('pwdInput').focus();
+  if (loginAttempts >= 5) {
+    loginLocked = true; lockUntil = Date.now() + 5 * 60 * 1000;
+    errEl.textContent = '🔒 Compte bloqué 5 minutes — trop de tentatives.';
+  } else {
+    errEl.textContent = `❌ Mot de passe incorrect (${5-loginAttempts} essai(s) restant(s))`;
+  }
+  errEl.style.display = 'block';
 }
 
 /* ══════════════════════════════════════
    ADMIN PANEL
 ══════════════════════════════════════ */
 function openAdmin() {
+  if (STORE_API_ON()) document.getElementById('adminTip').textContent = '☁️ Vos produits sont enregistrés en ligne : dès que vous cliquez sur « Enregistrer », ils sont visibles par tous vos clients (photos comprises). Rien d’autre à faire.';
   document.getElementById('adminOverlay').classList.add('open');
   document.body.style.overflow = 'hidden';
   renderAdminTable();
   resetForm();
 }
 function closeAdmin() {
+  adminKey = ''; // on oublie le mot de passe à la fermeture
   document.getElementById('adminOverlay').classList.remove('open');
   document.body.style.overflow = '';
 }
@@ -2266,7 +2385,7 @@ async function saveProduct() {
   const old = (oldPriceRaw > 0 && oldPriceRaw > price) ? oldPriceRaw : null;
   // Valider image
   const rawImg = document.getElementById('photoData').value;
-  const img = (rawImg && /^data:image\/(jpeg|png|webp|gif);base64,/.test(rawImg)) ? rawImg : null;
+  const img = (rawImg && IMG_OK.test(rawImg)) ? rawImg : null;
 
   const wasEditing = !!editingId;
   const prod = {
@@ -2398,7 +2517,7 @@ function renderAdminTable(query='') {
     // Image cell
     const tdImg = document.createElement('td');
     const timg = document.createElement('div'); timg.className = 'timg';
-    const safeImg = p.img && /^data:image\/(jpeg|png|webp|gif);base64,/.test(p.img) ? p.img : null;
+    const safeImg = p.img && IMG_OK.test(p.img) ? p.img : null;
     if (safeImg) { const img = document.createElement('img'); img.src = safeImg; img.alt=''; timg.appendChild(img); }
     else { timg.textContent = p.emoji||'🌸'; }
     tdImg.appendChild(timg);
@@ -2514,6 +2633,7 @@ async function generateHtmlCatalog() {
     // Récupère le code source de la page actuelle
     const resp = await fetch(window.location.href);
     let html = await resp.text();
+    html = html.replace(/\n\/\/ ── PRODUITS INTÉGRÉS \(catalogue de base\) ──\n(?:\/\/[^\n]*\n)*const STATIC_CATALOG = \[[^\n]*\];\n/, '');
 
     // Données produits à injecter (sans les photos base64 pour garder un fichier léger)
     // Les photos restent dans IndexedDB côté client
@@ -2524,21 +2644,19 @@ async function generateHtmlCatalog() {
 
     // Prépare les produits SANS photos (uniquement les données texte/prix)
     // pour alléger le HTML. Les photos restent dans IndexedDB.
-    const prodLight = products.map(p => {
-      const { img, ...rest } = p;
-      return { ...rest, img: null }; // on exclut les photos base64 du HTML statique
-    });
+    // Les photos (JPEG max 800 px) sont intégrées : tous les visiteurs voient les vraies photos
+    const prodLight = products.map(p => ({ ...p }));
 
     const injection = `
 // ── PRODUITS INTÉGRÉS (catalogue de base) ──
 // Ces produits sont chargés si IndexedDB est vide (premier visiteur ou autre appareil)
-const STATIC_CATALOG = ${JSON.stringify(prodLight)};
+const STATIC_CATALOG = ${JSON.stringify(prodLight).replace(/</g, '\\u003c')};
 `;
 
     // Cherche la ligne d'initialisation pour y injecter avant
     const marker = 'async function initApp()';
     if (html.includes(marker)) {
-      html = html.replace(marker, injection + '\n' + marker);
+      html = html.replace(marker, () => injection + '\n' + marker);
     }
 
     // Modifie loadStore pour charger STATIC_CATALOG si IndexedDB est vide
@@ -2566,7 +2684,7 @@ async function loadStore() {
     // Remplace la fonction loadStore existante
     html = html.replace(
       /async function loadStore\(\)[\s\S]*?^}/m,
-      loadPatch
+      () => loadPatch
     );
 
     // Télécharge le fichier généré
@@ -2613,7 +2731,7 @@ function validateProduct(p) {
   if (!['fille','garcon','mixte'].includes(p.gender)) return false;
   if (!['nouveau-ne','bebe','enfant','cadet'].includes(p.age)) return false;
   // Image : uniquement data URI image (optionnelle)
-  if (p.img && !/^data:image\/(jpeg|png|webp|gif);base64,/.test(p.img)) return false;
+  if (p.img && !IMG_OK.test(p.img)) return false;
   return true;
 }
 
